@@ -1,4 +1,4 @@
-module gofsm
+module github.com/vonsago/gofsm
 
 go 1.20
 
