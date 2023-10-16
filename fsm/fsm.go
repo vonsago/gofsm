@@ -69,7 +69,7 @@ type FSM struct {
 	fanWg      sync.WaitGroup
 	eventCount int
 	stateMu    sync.RWMutex
-	eventMu    sync.Mutex
+	eventMu    sync.RWMutex
 	// metadata can be used to store and load data that maybe used across events
 	// use methods SetMetadata() and Metadata() to store and load data
 	// FSMetaErrors are needed
@@ -246,6 +246,8 @@ func (f *FSM) FanIn(events ...*Event) {
 func (f *FSM) FanOut() {
 	go func() {
 		defer f.recordPanic()
+		f.eventMu.RLock()
+		defer f.eventMu.RUnlock()
 		for {
 			e, open := <-f.eventFan
 			if !open {
@@ -317,7 +319,9 @@ func (f *FSM) SelfCheck() {
 
 func (f *FSM) Wait() error {
 	// init channel and count
+	f.eventMu.Lock()
 	f.eventFan = make(chan *Event)
+	f.eventMu.Unlock()
 	f.eventCount = 0
 	c := f.CmpAndSwp(READY, WAIT)
 	if c != WAIT {

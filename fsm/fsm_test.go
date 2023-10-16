@@ -23,13 +23,16 @@ func testCallback(ee *Event, e *TransFsmError) {
 
 func trans0(event *Event) (dst string, err error) {
 	eventMeta := event.Metadata.(map[string]string)
+	ch := make(chan int)
 	go func() {
 		taskId, _ := strconv.Atoi(eventMeta["task_id"])
 		task := taskMockEvent[taskId]
 		task.Event = "tryCreateJob"
 		task.Src = "waiting"
 		task.Dst = "running"
+		<-ch
 	}()
+	ch <- 1
 	log.Info("trans0 sleep 1")
 	time.Sleep(time.Second * 1)
 	log.Infof(LOGTemple, event.Event, event.Src, event.Dst, eventMeta["task_id"])
@@ -38,13 +41,16 @@ func trans0(event *Event) (dst string, err error) {
 
 func trans1(event *Event) (dst string, err error) {
 	eventMeta := event.Metadata.(map[string]string)
+	ch := make(chan int)
 	go func() {
 		taskId, _ := strconv.Atoi(eventMeta["task_id"])
 		task := taskMockEvent[taskId]
 		task.Event = "TaskRun"
 		task.Src = "running"
 		task.Dst = ""
+		<-ch
 	}()
+	ch <- 1
 	log.Info("trans1 sleep 2")
 	time.Sleep(time.Second * 2)
 	log.Infof(LOGTemple, event.Event, event.Src, event.Dst, eventMeta["task_id"])
@@ -52,8 +58,8 @@ func trans1(event *Event) (dst string, err error) {
 }
 
 func trans2(event *Event) (dst string, err error) {
-
 	eventMeta := event.Metadata.(map[string]string)
+	ch := make(chan int)
 	go func() {
 		taskId, _ := strconv.Atoi(eventMeta["task_id"])
 		rand.Seed(time.Now().UnixNano())
@@ -67,7 +73,9 @@ func trans2(event *Event) (dst string, err error) {
 				task.Src = "fail"
 			}
 		}
+		<-ch
 	}()
+	ch <- 1
 	log.Info("trans2 sleep 1")
 	time.Sleep(time.Second * 1)
 	log.Infof(LOGTemple, event.Event, event.Src, event.Dst, eventMeta["task_id"])
@@ -76,6 +84,7 @@ func trans2(event *Event) (dst string, err error) {
 
 func trans3(event *Event) (dst string, err error) {
 	eventMeta := event.Metadata.(map[string]string)
+	ch := make(chan int)
 	go func() {
 		taskId, _ := strconv.Atoi(eventMeta["task_id"])
 
@@ -87,7 +96,9 @@ func trans3(event *Event) (dst string, err error) {
 			task.Src = "waiting"
 			task.Dst = "running"
 		}
+		<-ch
 	}()
+	ch <- 1
 	log.Info("trans3 sleep 2")
 	time.Sleep(time.Second * 2)
 	log.Infof(LOGTemple, event.Event, event.Src, event.Dst, eventMeta["task_id"])
