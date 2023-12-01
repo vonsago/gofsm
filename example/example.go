@@ -1,3 +1,3 @@
 package example
 
-// fsm test
+// see fsm test

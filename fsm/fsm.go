@@ -139,7 +139,7 @@ func (f *FSM) signalHandler() {
 		case syscall.SIGUSR1:
 			time.Sleep(2 * time.Second)
 		case syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT:
-			f.Quit()
+			f.quit()
 		default:
 			log.Infof("signalHandler receive signal %v", sig)
 		}
@@ -157,7 +157,7 @@ func (f *FSM) Current() string {
 	return c
 }
 
-func (f *FSM) SetCurrent(s string) {
+func (f *FSM) setCurrent(s string) {
 	f.stateMu.Lock()
 	f.current = s
 	f.stateMu.Unlock()
@@ -296,11 +296,11 @@ func (f *FSM) GetTransName(e eKey, dst string) string {
 	}
 }
 
-// SelfCheck
+// selfCheck
 // This method is the pre-process before FSM round which is contains
 // user's callback and register signal listen.
 // In addition, it checks if the registered, status, events or transitions is legal.
-func (f *FSM) SelfCheck() {
+func (f *FSM) selfCheck() {
 	// flow legal check
 	for k, v := range f.transitions {
 		if _, ok := f.transition[f.GetTransName(k, v)]; !ok {
@@ -308,7 +308,18 @@ func (f *FSM) SelfCheck() {
 				ErrFSMTransitionNotRegister, k.event, k.src, v))
 		}
 	}
-	// callback
+	// If mode is singleton, the NEW callback is needed.
+	// User can implement own logic to make sure only one fsm running at a moment.
+	if f.Mode == ModeSingle {
+		if callback, ok := f.callback[READY]; ok {
+			panic(ErrFSMCallbackNewNeeded)
+		} else {
+			if e := callback(f); e != nil {
+				log.Error("SelfCheck FSM NEW callback error")
+			}
+		}
+	}
+	// callback ready
 	if callback, ok := f.callback[READY]; ok {
 		if e := callback(f); e != nil {
 			log.Error("SelfCheck FSM READY callback error")
@@ -317,7 +328,7 @@ func (f *FSM) SelfCheck() {
 	_ = f.CmpAndSwp(NEW, READY)
 }
 
-func (f *FSM) Wait() error {
+func (f *FSM) wait() error {
 	// init channel and count
 	f.eventMu.Lock()
 	f.eventFan = make(chan *Event)
@@ -341,7 +352,7 @@ func (f *FSM) Wait() error {
 }
 
 func (f *FSM) RunFan() error {
-	defer f.SetCurrent(READY)
+	defer f.setCurrent(READY)
 	f.CmpAndSwp(WAIT, RUN)
 	for i := 0; i < f.fanCount; i++ {
 		f.FanOut()
@@ -358,7 +369,7 @@ func (f *FSM) RunFan() error {
 	return nil
 }
 
-func (f *FSM) Quit() {
+func (f *FSM) quit() {
 	if f.Current() == QUIT {
 		return
 	}
@@ -382,15 +393,15 @@ func (f *FSM) Quit() {
 
 // LoopControl
 //
-//	 ├──> SelfCheck() [callback[READY]] ──> return err
+//	 ├──> selfCheck() [callback[READY]] ──> return err
 //	 ├
-//	 ├─Loop─> Wait() [callback[WAIT]] ──> Run() [callback[RUN]]
+//	 ├─Loop─> wait() [callback[WAIT]] ──> Run() [callback[RUN]]
 //		         └──> showReport()
-//	 ├  *SetCurrent(QUIT) to quit loop
-//	 └──> Quit() [callback[QUIT]]
+//	 ├  *setCurrent(QUIT) to quit loop
+//	 └──> quit() [callback[QUIT]]
 func (f *FSM) LoopControl() {
 	go f.signalHandler()
-	f.SelfCheck()
+	f.selfCheck()
 	for {
 		st := time.Now().UnixMilli()
 		c := f.Current()
@@ -399,15 +410,16 @@ func (f *FSM) LoopControl() {
 		} else if c == WAIT {
 			continue
 		}
-		f.SetCurrent(READY)
-		_ = f.Wait()
+		f.setCurrent(READY)
+		// TODO refactor async
+		_ = f.wait()
 		_ = f.RunFan()
 		cost := time.Now().UnixMilli() - st
 		f.SetMetadata(FSMetaCost, cost)
 		log.Infof("FSM Run cost: %d ms", cost)
 		time.Sleep(f.interval)
 	}
-	f.Quit()
+	f.quit()
 }
 
 func NewFSM(events []EventDesc, interval time.Duration, mode string, showFlow bool, fanCount int) *FSM {

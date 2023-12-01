@@ -24,4 +24,5 @@ var (
 	ErrFSMIsRunning             = errors.New("FSM is running")
 	ErrFSMRegisterError         = errors.New("FSM register error")
 	ErrFSMTransitionNotRegister = errors.New("FSM event transition executor is needed")
+	ErrFSMCallbackNewNeeded     = errors.New("FSM NEW callback need to register for blocking the state when mode is ModeSingle")
 )
