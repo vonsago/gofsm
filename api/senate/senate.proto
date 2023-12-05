@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+import "google/protobuf/empty.proto";
+
+package senate.v1;
+
+option  go_package = "api/senate";
+
+
+service Live {
+  rpc Ping(.google.protobuf.Empty) returns (Pong);
+  rpc CampaignLeader(SyncTermReq) returns (SyncTermResp);
+  rpc HeartBeat(HeartReq) returns (HeartResp);
+}
+
+enum Role {
+  role = 0;
+  leader = 1;
+  follower = 2;
+  candidate = 3;
+}
+
+message SyncTermReq {
+  string addr = 1;
+  string id = 2;
+  Role role = 3;
+  string vote = 4;
+  int32 term = 5;
+}
+
+message SyncTermResp {
+  bool ready =1;
+  string vote = 2;
+  int32 term = 3;
+  Role role = 4;
+}
+
+message HeartReq {
+  string leader_id = 1;
+  int32 term = 2;
+}
+
+message HeartResp {
+  bool ready = 1;
+}
+
+message Pong {
+  string msg = 1;
+}

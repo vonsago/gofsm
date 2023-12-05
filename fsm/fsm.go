@@ -47,6 +47,9 @@ type FSM struct {
 	// fanCount
 	fanCount int
 
+	// cluster
+	cluster ClusterConf
+
 	// allEvents and allStates record FSM strategy
 	allEvents map[string]bool
 	allStates map[string]bool
@@ -322,7 +325,7 @@ func (f *FSM) selfCheck() {
 	// callback ready
 	if callback, ok := f.callback[READY]; ok {
 		if e := callback(f); e != nil {
-			log.Error("SelfCheck FSM READY callback error")
+			panic(fmt.Sprintf("%v, cause SelfCheck FSM READY callback error", ErrStateNotAvailable))
 		}
 	}
 	_ = f.CmpAndSwp(NEW, READY)
