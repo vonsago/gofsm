@@ -27,5 +27,5 @@ var (
 	ErrFSMTransitionNotRegister = errors.New("FSM event transition executor is needed")
 	ErrFSMCallbackNewNeeded     = errors.New("FSM NEW callback need to register for blocking the state when mode is ModeSingle")
 	// FSM cluster error
-	ErrClusterWrong = errors.New("some thing unexpect")
+	ErrClusterInitError = errors.New("should be the serial number among addrs")
 )

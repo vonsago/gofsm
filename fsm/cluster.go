@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"github.com/golang/protobuf/ptypes/empty"
 	log "github.com/sirupsen/logrus"
-	"github.com/vonsago/gofsm/api"
 	"github.com/vonsago/gofsm/api/senate"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/reflection"
 	"net"
 	"strings"
 	"sync"
@@ -51,27 +51,29 @@ type Node struct {
 	conn     *grpc.ClientConn
 }
 
-func NewClusterConf(id, addrs, clusters string, timeout int32, work bool) *ClusterConf {
-	var nodes map[string]*Node
-	for i, v := range strings.Split(clusters, ",") {
-		d := fmt.Sprint(i)
-		nodes[d] = &Node{
-			Id:       d,
+func NewClusterConf(id, ids, addrs string, timeout int32, work bool) *ClusterConf {
+	nodes := make(map[string]*Node)
+	idm := strings.Split(ids, ",")
+	for i, v := range strings.Split(addrs, ",") {
+		nodes[idm[i]] = &Node{
+			Id:       idm[i],
 			Addr:     v,
 			Role:     Role,
 			Vote:     "",
 			Ready:    false,
 			Term:     0,
-			LeaderId: d,
+			LeaderId: "",
 			AliveT:   time.Now(),
 			conn:     nil,
 		}
+	}
+	if nodes[id] == nil {
+		panic(fmt.Sprintf("id %s of %s %s", id, addrs, ErrClusterInitError))
 	}
 	c := &ClusterConf{
 		Id:         id,
 		Addrs:      addrs,
 		Timeout:    timeout,
-		Clusters:   clusters,
 		LeaderWork: work,
 		Nodes:      nodes,
 		timer:      time.NewTimer(1 * time.Second),
@@ -79,15 +81,16 @@ func NewClusterConf(id, addrs, clusters string, timeout int32, work bool) *Clust
 	return c
 }
 
-func (cf *ClusterConf) startServe() error {
-	listener, err := net.Listen("tcp", cf.Addrs)
+func (cf *ClusterConf) startServe(ln *Node) error {
+	listener, err := net.Listen("tcp", ln.Addr)
 	if err != nil {
 		return err
 	}
-	server := grpc.NewServer()
-	senate.RegisterLiveServer(server, &api.Server{})
+	s := grpc.NewServer()
+	senate.RegisterLiveServer(s, &Server{})
+	reflection.Register(s)
 	go func() {
-		err = server.Serve(listener)
+		err = s.Serve(listener)
 		if err != nil {
 			panic(err)
 		}
@@ -108,7 +111,7 @@ func (cf *ClusterConf) run() {
 	}
 	switch ln.Role {
 	case Role:
-		err := cf.startServe()
+		err := cf.startServe(ln)
 		if err != nil {
 			log.Errorf("start serve at %s error %v", ln.Addr, err)
 			return
