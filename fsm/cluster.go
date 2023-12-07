@@ -6,6 +6,7 @@ import (
 	"github.com/golang/protobuf/ptypes/empty"
 	log "github.com/sirupsen/logrus"
 	"github.com/vonsago/gofsm/api/senate"
+	"github.com/vonsago/gofsm/cache"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/reflection"
@@ -15,21 +16,6 @@ import (
 	"time"
 )
 
-type ClusterConf struct {
-	Id         string
-	Addrs      string
-	Clusters   string
-	Timeout    int32
-	LeaderWork bool
-	// cluster status
-	Nodes map[string]*Node
-	nlock sync.RWMutex
-	stopc chan bool
-	timer *time.Timer
-	// events
-	eventc chan *Event
-}
-
 type RoleType int
 
 const (
@@ -38,6 +24,28 @@ const (
 	Follower
 	Candidate
 )
+
+const (
+	CacheRegular = "cluster:regular"
+)
+
+type ClusterConf struct {
+	Id         string
+	Addrs      string
+	Clusters   string
+	Timeout    int32
+	LeaderWork bool
+	// cache result
+	Regular *cache.Cache
+	// cluster status
+	Nodes map[string]*Node
+	nlock sync.RWMutex
+	stopc chan bool
+	timer *time.Ticker
+	// channel for server to self node
+	eventc chan *Event
+	nodec  chan *Node
+}
 
 type Node struct {
 	Id       string
@@ -75,8 +83,11 @@ func NewClusterConf(id, ids, addrs string, timeout int32, work bool) *ClusterCon
 		Addrs:      addrs,
 		Timeout:    timeout,
 		LeaderWork: work,
+		Regular:    cache.New(cache.NoExpiration, cache.DefaultExpiration),
 		Nodes:      nodes,
-		timer:      time.NewTimer(1 * time.Second),
+		timer:      time.NewTicker(1 * time.Second),
+		eventc:     make(chan *Event),
+		nodec:      make(chan *Node),
 	}
 	return c
 }
@@ -87,7 +98,12 @@ func (cf *ClusterConf) startServe(ln *Node) error {
 		return err
 	}
 	s := grpc.NewServer()
-	senate.RegisterLiveServer(s, &Server{})
+	senate.RegisterLiveServer(s, &Server{
+		id:         cf.Id,
+		regulation: cf.Regular,
+		nioch:      cf.nodec,
+		eioch:      cf.eventc,
+	})
 	reflection.Register(s)
 	go func() {
 		err = s.Serve(listener)
@@ -103,12 +119,12 @@ func (cf *ClusterConf) run() {
 	ln := cf.Nodes[cf.Id]
 	ns := cf.Nodes
 	cf.nlock.RUnlock()
-	if int32(time.Now().Unix()-ln.AliveT.Unix()) > cf.Timeout {
-		cf.nlock.Lock()
-		cf.Nodes[cf.Id].Ready = false
-		cf.nlock.Unlock()
-		log.Warningf("node %s at %s timeout", ln.Id, ln.Addr)
-	}
+	//if int32(time.Now().Unix()-ln.AliveT.Unix()) > cf.Timeout {
+	//	cf.nlock.Lock()
+	//	cf.Nodes[cf.Id].Ready = false
+	//	cf.nlock.Unlock()
+	//	log.Warningf("node %s at %s timeout", ln.Id, ln.Addr)
+	//}
 	switch ln.Role {
 	case Role:
 		err := cf.startServe(ln)
@@ -123,7 +139,7 @@ func (cf *ClusterConf) run() {
 	case Leader:
 		cf.SyncTerm2Others(ln, ns)
 	case Follower:
-		if ns[ln.LeaderId].Ready {
+		if ln.LeaderId != "" && ns[ln.LeaderId].Ready {
 			if int32(time.Now().Unix()-ns[ln.LeaderId].AliveT.Unix()) > cf.Timeout {
 				cf.nlock.Lock()
 				cf.Nodes[ln.LeaderId].Ready = false
@@ -147,7 +163,10 @@ func (cf *ClusterConf) run() {
 			_ = cf.CheckClusterHealthy(ns)
 		}
 	}
-	// TODO cache nodes map for use
+	// cache nodes map for use
+	cf.nlock.RLock()
+	cf.Regular.Set(CacheRegular, cf.Nodes, cache.NoExpiration)
+	cf.nlock.RUnlock()
 }
 
 func (cf *ClusterConf) GetOrConnectOthers(ns map[string]*Node) error {
@@ -183,16 +202,20 @@ func (cf *ClusterConf) DisconnectAll(ns map[string]*Node) error {
 }
 
 func (cf *ClusterConf) CheckClusterHealthy(ns map[string]*Node) bool {
-	err := cf.GetOrConnectOthers(ns)
-	if err != nil {
-		log.Errorf("connect to other error %v", err)
-	}
+	_ = cf.GetOrConnectOthers(ns)
 	aliveCount := 1
 	for _, v := range ns {
+		if v.Id == cf.Id {
+			continue
+		}
+		if v.conn == nil {
+			log.Errorf("Connect from id[%s] to id[%s] fail, please check address: %s", cf.Id, v.Id, v.Addr)
+			continue
+		}
 		c := senate.NewLiveClient(v.conn)
 		resp, err := c.Ping(context.TODO(), new(empty.Empty))
 		if err != nil {
-			log.Warningf("heart to %s at %s, error %v", v.Id, v.Addr, err)
+			log.Errorf("Heart from id[%s] to id[%s] at %s, error %v", cf.Id, v.Id, v.Addr, err)
 			continue
 		}
 		//if resp.Role == Leader && resp.Term > v.Term && resp.Ready {
@@ -202,18 +225,22 @@ func (cf *ClusterConf) CheckClusterHealthy(ns map[string]*Node) bool {
 			aliveCount++
 		}
 	}
-	if aliveCount%2 == 0 {
-		log.Warn("Even number of nodes cannot be started")
+	if aliveCount < 2 {
+		log.Errorf("Alive Nodes Number: %d < 2, Cluster started failed", aliveCount)
 		return false
 	}
 	return true
 }
 
 func (cf *ClusterConf) StartCampaign(ln *Node, ns map[string]*Node) bool {
-	getVotes := 1
-	aliveCount := 1
+	getVotes := 0
+	aliveCount := 0
 	for _, v := range ns {
 		if ln.conn == nil {
+			continue
+		}
+		if ln.Id == cf.Id {
+			getVotes++
 			continue
 		}
 		req := &senate.SyncTermReq{
@@ -244,7 +271,7 @@ func (cf *ClusterConf) StartCampaign(ln *Node, ns map[string]*Node) bool {
 		log.Infof("id %s become leader at term %d get vote %d of %d", ln.Id, ln.Term+1, getVotes, aliveCount)
 		return true
 	}
-	return true
+	return false
 }
 
 func (cf *ClusterConf) SyncTerm2Others(ln *Node, ns map[string]*Node) {
@@ -260,7 +287,7 @@ func (cf *ClusterConf) SyncTerm2Others(ln *Node, ns map[string]*Node) {
 		}
 		resp, err := c.HeartBeat(context.TODO(), req)
 		if err != nil || !resp.Ready {
-			log.Warningf("heart to %s at %s ready %v, error %v", v.Id, v.Addr, v.Ready, err)
+			log.Errorf("heart to %s at %s ready %v, error %v", v.Id, v.Addr, v.Ready, err)
 		}
 	}
 }
@@ -270,6 +297,10 @@ func (cf *ClusterConf) Run() {
 		select {
 		case <-cf.stopc:
 			return
+		case n := <-cf.nodec:
+			log.Info(n)
+		case e := <-cf.eventc:
+			log.Info(e)
 		case <-cf.timer.C:
 			cf.run()
 		}

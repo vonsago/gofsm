@@ -16,7 +16,7 @@ type Node struct {
 }
 
 func TestCache(t *testing.T) {
-	ca = New(-1, 0)
+	ca = New(NoExpiration, DefaultExpiration)
 	ca.Set("tk", map[string]string{"k": "tv"}, time.Second*2)
 
 	t.Run("testUpdateCache", testUpdateCache)
