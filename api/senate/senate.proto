@@ -29,10 +29,9 @@ message SyncTermReq {
 }
 
 message SyncTermResp {
-  bool ready =1;
-  string vote = 2;
-  int32 term = 3;
-  Role role = 4;
+  string vote = 1;
+  int32 term = 2;
+  Role role = 3;
 }
 
 message HeartReq {

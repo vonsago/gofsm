@@ -13,7 +13,7 @@ import (
 )
 
 func TestApi(t *testing.T) {
-	addr := "0.0.0.0:8000"
+	addr := "0.0.0.0:8888"
 	listener, err := net.Listen("tcp", addr)
 	assert.Assert(t, err == nil)
 	server := grpc.NewServer()
@@ -30,4 +30,14 @@ func TestApi(t *testing.T) {
 	resp, err := c.Ping(context.TODO(), &emptypb.Empty{})
 	assert.Assert(t, err == nil)
 	log.Infof("test Ping: %s", resp.Msg)
+}
+
+func TestClient(t *testing.T) {
+	addr := "0.0.0.0:8887"
+	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	c := senate.NewLiveClient(conn)
+	resp, err := c.Ping(context.TODO(), &emptypb.Empty{})
+	assert.Assert(t, err == nil)
+	log.Infof("test Ping: %s", resp.Msg)
+
 }
