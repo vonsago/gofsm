@@ -250,11 +250,13 @@ func (cf *ClusterConf) StartCampaign(ln *Node, ns map[string]*Node) bool {
 			c := senate.NewLiveClient(v.conn)
 			resp, err := c.CampaignLeader(cf.ctx, req)
 			if err != nil || resp == nil {
+				_ = v.conn.Close()
+				v.conn = nil
 				log.Warningf("canditate to %s at %s, error %v", ln.Id, v.Addr, err)
 				continue
 			}
 			if resp.Term > ln.Term+1 {
-				log.Warningf("candidate term %d is behand %d", ln.Term, resp.Term)
+				log.Warningf("candidate term %d is behand %d", ln.Term+1, resp.Term)
 				return false
 			}
 			aliveCount++
@@ -271,6 +273,9 @@ func (cf *ClusterConf) StartCampaign(ln *Node, ns map[string]*Node) bool {
 	}
 	if aliveCount == 0 {
 		log.Warningf("all node died")
+		if cf.LeaderWork {
+			return true
+		}
 		return false
 	}
 	if getVotes > aliveCount-getVotes {
@@ -301,6 +306,8 @@ func (cf *ClusterConf) SyncTerm2Others(ln *Node, ns map[string]*Node) {
 		}
 		resp, err := c.HeartBeat(cf.ctx, req)
 		if err != nil {
+			_ = v.conn.Close()
+			v.conn = nil
 			log.Errorf("leader: %s sync term to %s at %s error %v", cf.Id, v.Id, v.Addr, err)
 		}
 		if resp != nil {
