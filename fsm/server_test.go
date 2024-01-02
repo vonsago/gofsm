@@ -29,7 +29,7 @@ func TestApi(t *testing.T) {
 	c := senate.NewLiveClient(conn)
 	resp, err := c.Ping(context.TODO(), &emptypb.Empty{})
 	assert.Assert(t, err == nil)
-	log.Infof("test Ping: %s", resp.Msg)
+	log.Infof("test Ping: %v", resp.Ready)
 }
 
 func TestClient(t *testing.T) {
@@ -38,6 +38,6 @@ func TestClient(t *testing.T) {
 	c := senate.NewLiveClient(conn)
 	resp, err := c.Ping(context.TODO(), &emptypb.Empty{})
 	assert.Assert(t, err == nil)
-	log.Infof("test Ping: %s", resp.Msg)
+	log.Infof("test Ping: %v", resp.Ready)
 
 }

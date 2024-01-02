@@ -44,5 +44,8 @@ message HeartResp {
 }
 
 message Pong {
-  string msg = 1;
+  bool ready = 1;
+  int32 term = 2;
+  Role role = 3;
+  string leader_id = 4;
 }

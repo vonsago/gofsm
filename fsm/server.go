@@ -63,5 +63,15 @@ func (s *Server) HeartBeat(ctx context.Context, in *senate.HeartReq) (*senate.He
 }
 
 func (s *Server) Ping(ctx context.Context, in *emptypb.Empty) (*senate.Pong, error) {
-	return &senate.Pong{Msg: "Hello "}, nil
+	resp := &senate.Pong{}
+	if ca, ok := s.regulation.Get(CacheRegular); ok {
+		n := ca.(map[string]*Node)[s.id]
+		resp.Ready = true
+		resp.Term = n.Term
+		resp.Role = senate.Role(n.Role)
+		resp.LeaderId = n.LeaderId
+		return resp, nil
+	} else {
+		return resp, ErrNodeNotReady
+	}
 }

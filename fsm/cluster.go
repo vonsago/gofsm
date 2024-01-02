@@ -115,6 +115,7 @@ func (cf *ClusterConf) startServe() error {
 			panic(err)
 		}
 	}()
+	log.Infof("start serve at %s", ln.Addr)
 	return nil
 }
 
@@ -129,22 +130,23 @@ func (cf *ClusterConf) selfCheck() {
 		cf.Nodes[cf.Id].Role = Follower
 		cf.nlock.Unlock()
 	case Leader:
-		cf.SyncTerm2Others(ln, ns)
+		cf.SyncTerm2Others(ln)
 	case Follower:
 		if int32(time.Now().Unix()-ln.AliveT.Unix()) > cf.Timeout {
-			cf.nlock.Lock()
-			ns[cf.Id].Role = Candidate
-			cf.nlock.Unlock()
+			if !cf.ClusterHasLeader() {
+				cf.nlock.Lock()
+				ns[cf.Id].Role = Candidate
+				cf.nlock.Unlock()
+			}
 		}
 	case Candidate:
-		if cf.StartCampaign(ln, ns) {
+		if cf.StartCampaign(ln) {
 			cf.nlock.Lock()
 			ns[cf.Id].Role = Leader
 			ns[cf.Id].Term += 1
 			cf.nlock.Unlock()
 		} else {
-			if cf.CheckClusterHealthy(ns) {
-
+			if cf.CheckClusterHealthy() {
 			}
 		}
 	}
@@ -155,13 +157,13 @@ func (cf *ClusterConf) selfCheck() {
 	cf.nlock.RUnlock()
 }
 
-func (cf *ClusterConf) GetOrConnectOthers(ns map[string]*Node) error {
+func (cf *ClusterConf) GetOrConnectOthers() error {
 	//var kacp = keepalive.ClientParameters{
 	//	Time:                10 * time.Second, // send pings every 10 seconds if there is no activity
 	//	Timeout:             time.Second,      // wait 1 second for ping ack before considering the connection dead
 	//	PermitWithoutStream: true,             // send pings even without active streams
 	//}
-	for _, v := range ns {
+	for _, v := range cf.Nodes {
 		if v.conn != nil || v.Id == cf.Id {
 			continue
 		}
@@ -178,8 +180,8 @@ func (cf *ClusterConf) GetOrConnectOthers(ns map[string]*Node) error {
 	return nil
 }
 
-func (cf *ClusterConf) DisconnectAll(ns map[string]*Node) error {
-	for _, v := range ns {
+func (cf *ClusterConf) DisconnectAll() error {
+	for _, v := range cf.Nodes {
 		if v.conn != nil {
 			err := v.conn.Close()
 			if err != nil {
@@ -190,10 +192,9 @@ func (cf *ClusterConf) DisconnectAll(ns map[string]*Node) error {
 	return nil
 }
 
-func (cf *ClusterConf) CheckClusterHealthy(ns map[string]*Node) bool {
-	_ = cf.GetOrConnectOthers(ns)
-	aliveCount := 1
-	for _, v := range ns {
+func (cf *ClusterConf) ClusterHasLeader() bool {
+	_ = cf.GetOrConnectOthers()
+	for _, v := range cf.Nodes {
 		if v.Id == cf.Id {
 			continue
 		}
@@ -207,8 +208,31 @@ func (cf *ClusterConf) CheckClusterHealthy(ns map[string]*Node) bool {
 			log.Errorf("Heart from id[%s] to id[%s] at %s, error %v", cf.Id, v.Id, v.Addr, err)
 			continue
 		}
+		if resp.Role == Leader {
+			return true
+		}
+	}
+	return false
+}
 
-		if resp.Msg != "" {
+func (cf *ClusterConf) CheckClusterHealthy() bool {
+	_ = cf.GetOrConnectOthers()
+	aliveCount := 1
+	for _, v := range cf.Nodes {
+		if v.Id == cf.Id {
+			continue
+		}
+		if v.conn == nil {
+			log.Errorf("Connect from id[%s] to id[%s] fail, please check address: %s", cf.Id, v.Id, v.Addr)
+			continue
+		}
+		c := senate.NewLiveClient(v.conn)
+		resp, err := c.Ping(context.Background(), new(empty.Empty))
+		if err != nil {
+			log.Errorf("Heart from id[%s] to id[%s] at %s, error %v", cf.Id, v.Id, v.Addr, err)
+			continue
+		}
+		if resp.Ready {
 			aliveCount++
 		}
 	}
@@ -219,11 +243,11 @@ func (cf *ClusterConf) CheckClusterHealthy(ns map[string]*Node) bool {
 	return true
 }
 
-func (cf *ClusterConf) StartCampaign(ln *Node, ns map[string]*Node) bool {
+func (cf *ClusterConf) StartCampaign(ln *Node) bool {
 	cf.nlock.Lock()
 	defer cf.nlock.Unlock()
 
-	_ = cf.GetOrConnectOthers(ns)
+	_ = cf.GetOrConnectOthers()
 	getVotes := 0
 	aliveCount := 0
 	selfVotes := 0
@@ -238,37 +262,41 @@ func (cf *ClusterConf) StartCampaign(ln *Node, ns map[string]*Node) bool {
 	if ln.Vote == "" {
 		ln.Vote = ln.Id
 	}
-	if ln.Vote == ln.Id {
-		getVotes++
+	if ln.Vote != ln.Id {
+		return false
+	}
+	getVotes++
+	aliveCount++
+	selfVotes++
+	minId = ln.Id
+	for _, v := range cf.Nodes {
+		if v.conn == nil {
+			continue
+		}
+		c := senate.NewLiveClient(v.conn)
+		resp, err := c.CampaignLeader(cf.ctx, req)
+		if err != nil || resp == nil {
+			_ = v.conn.Close()
+			v.conn = nil
+			log.Warningf("canditate to %s at %s, error %v", ln.Id, v.Addr, err)
+			continue
+		}
+		log.Debugf("node %s at term [%d], get vote to %s from node %s at term [%d]",
+			ln.Id, ln.Term, resp.Vote, v.Id, resp.Term)
+
+		if resp.Term > ln.Term+1 {
+			log.Warningf("candidate term %d is behand %d", ln.Term+1, resp.Term)
+			return false
+		}
 		aliveCount++
-		selfVotes++
-		minId = ln.Id
-		for _, v := range ns {
-			if v.conn == nil {
-				continue
-			}
-			c := senate.NewLiveClient(v.conn)
-			resp, err := c.CampaignLeader(cf.ctx, req)
-			if err != nil || resp == nil {
-				_ = v.conn.Close()
-				v.conn = nil
-				log.Warningf("canditate to %s at %s, error %v", ln.Id, v.Addr, err)
-				continue
-			}
-			if resp.Term > ln.Term+1 {
-				log.Warningf("candidate term %d is behand %d", ln.Term+1, resp.Term)
-				return false
-			}
-			aliveCount++
-			if resp.Vote == ln.Id {
-				getVotes++
-			}
-			if resp.Vote == v.Id {
-				selfVotes++
-			}
-			if minId == "" || minId > v.Id {
-				minId = v.Id
-			}
+		if resp.Vote == ln.Id {
+			getVotes++
+		}
+		if resp.Vote == v.Id {
+			selfVotes++
+		}
+		if minId == "" || minId > v.Id {
+			minId = v.Id
 		}
 	}
 	if aliveCount == 0 {
@@ -290,12 +318,12 @@ func (cf *ClusterConf) StartCampaign(ln *Node, ns map[string]*Node) bool {
 	return false
 }
 
-func (cf *ClusterConf) SyncTerm2Others(ln *Node, ns map[string]*Node) {
-	err := cf.GetOrConnectOthers(ns)
+func (cf *ClusterConf) SyncTerm2Others(ln *Node) {
+	err := cf.GetOrConnectOthers()
 	if err != nil {
 		log.Errorf("connect to other error %v", err)
 	}
-	for _, v := range ns {
+	for _, v := range cf.Nodes {
 		if v.conn == nil {
 			continue
 		}
@@ -326,6 +354,8 @@ func (cf *ClusterConf) passServeNode(n *Node) {
 		cf.Nodes[n.LeaderId].Term, cf.Nodes[cf.Id].Term = n.Term, n.Term
 		cf.Nodes[cf.Id].LeaderId = n.LeaderId
 		cf.Nodes[cf.Id].Role = Follower
+		cf.Nodes[cf.Id].Vote = ""
+		log.Debugf("has leader: %s, nodes: %v", n.LeaderId, cf.Nodes)
 	} else if n.Role == Candidate {
 		ln := cf.Nodes[cf.Id]
 		if ln.Term > n.Term {
@@ -336,6 +366,7 @@ func (cf *ClusterConf) passServeNode(n *Node) {
 			cf.Nodes[n.Id].Term = n.Term
 			cf.Nodes[n.Id].Vote = n.Vote
 		}
+		log.Debugf("%s will vote to %s, nodes: %v", n.Id, ln.Vote, cf.Nodes)
 	}
 	cf.nlock.Unlock()
 }
