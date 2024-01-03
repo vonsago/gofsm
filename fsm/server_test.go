@@ -39,5 +39,4 @@ func TestClient(t *testing.T) {
 	resp, err := c.Ping(context.TODO(), &emptypb.Empty{})
 	assert.Assert(t, err == nil)
 	log.Infof("test Ping: %v", resp.Ready)
-
 }

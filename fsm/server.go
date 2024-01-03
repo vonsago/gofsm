@@ -2,9 +2,11 @@ package fsm
 
 import (
 	"context"
+	log "github.com/sirupsen/logrus"
 	"github.com/vonsago/gofsm/api/senate"
 	"github.com/vonsago/gofsm/cache"
 	"google.golang.org/protobuf/types/known/emptypb"
+	"io"
 	"time"
 )
 
@@ -73,5 +75,29 @@ func (s *Server) Ping(ctx context.Context, in *emptypb.Empty) (*senate.Pong, err
 		return resp, nil
 	} else {
 		return resp, ErrNodeNotReady
+	}
+}
+
+func (s *Server) ReceiveEvents(stream senate.Live_ReceiveEventsServer) error {
+	ec := 0
+	for {
+		in, err := stream.Recv()
+		if err == io.EOF {
+			log.Infof("node %s recievd events summary count: %d", s.id, ec)
+			return stream.SendAndClose(&senate.EventSummary{Count: int32(ec)})
+		}
+		if err != nil {
+			return err
+		}
+		log.Infof("node %s recived event: %s", s.id, in.Id)
+		s.eioch <- &Event{
+			ID:       in.Id,
+			Event:    in.Event,
+			Priority: 0,
+			Src:      in.Src,
+			Dst:      in.Dst,
+			Metadata: in.Metadata,
+		}
+		ec += 1
 	}
 }

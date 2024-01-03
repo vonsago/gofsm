@@ -314,12 +314,8 @@ func (f *FSM) selfCheck() {
 	// If mode is singleton, the NEW callback is needed.
 	// User can implement own logic to make sure only one fsm running at a moment.
 	if f.Mode == ModeSingle {
-		if callback, ok := f.callback[READY]; ok {
+		if _, ok := f.callback[READY]; ok {
 			panic(ErrFSMCallbackNewNeeded)
-		} else {
-			if e := callback(f); e != nil {
-				log.Error("SelfCheck FSM NEW callback error")
-			}
 		}
 	}
 	// callback ready

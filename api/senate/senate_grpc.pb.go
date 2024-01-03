@@ -26,6 +26,8 @@ type LiveClient interface {
 	Ping(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*Pong, error)
 	CampaignLeader(ctx context.Context, in *SyncTermReq, opts ...grpc.CallOption) (*SyncTermResp, error)
 	HeartBeat(ctx context.Context, in *HeartReq, opts ...grpc.CallOption) (*HeartResp, error)
+	// events
+	ReceiveEvents(ctx context.Context, opts ...grpc.CallOption) (Live_ReceiveEventsClient, error)
 }
 
 type liveClient struct {
@@ -63,6 +65,40 @@ func (c *liveClient) HeartBeat(ctx context.Context, in *HeartReq, opts ...grpc.C
 	return out, nil
 }
 
+func (c *liveClient) ReceiveEvents(ctx context.Context, opts ...grpc.CallOption) (Live_ReceiveEventsClient, error) {
+	stream, err := c.cc.NewStream(ctx, &Live_ServiceDesc.Streams[0], "/senate.v1.Live/ReceiveEvents", opts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &liveReceiveEventsClient{stream}
+	return x, nil
+}
+
+type Live_ReceiveEventsClient interface {
+	Send(*Event) error
+	CloseAndRecv() (*EventSummary, error)
+	grpc.ClientStream
+}
+
+type liveReceiveEventsClient struct {
+	grpc.ClientStream
+}
+
+func (x *liveReceiveEventsClient) Send(m *Event) error {
+	return x.ClientStream.SendMsg(m)
+}
+
+func (x *liveReceiveEventsClient) CloseAndRecv() (*EventSummary, error) {
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	m := new(EventSummary)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 // LiveServer is the server API for Live service.
 // All implementations must embed UnimplementedLiveServer
 // for forward compatibility
@@ -70,6 +106,8 @@ type LiveServer interface {
 	Ping(context.Context, *emptypb.Empty) (*Pong, error)
 	CampaignLeader(context.Context, *SyncTermReq) (*SyncTermResp, error)
 	HeartBeat(context.Context, *HeartReq) (*HeartResp, error)
+	// events
+	ReceiveEvents(Live_ReceiveEventsServer) error
 	mustEmbedUnimplementedLiveServer()
 }
 
@@ -85,6 +123,9 @@ func (UnimplementedLiveServer) CampaignLeader(context.Context, *SyncTermReq) (*S
 }
 func (UnimplementedLiveServer) HeartBeat(context.Context, *HeartReq) (*HeartResp, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method HeartBeat not implemented")
+}
+func (UnimplementedLiveServer) ReceiveEvents(Live_ReceiveEventsServer) error {
+	return status.Errorf(codes.Unimplemented, "method ReceiveEvents not implemented")
 }
 func (UnimplementedLiveServer) mustEmbedUnimplementedLiveServer() {}
 
@@ -153,6 +194,32 @@ func _Live_HeartBeat_Handler(srv interface{}, ctx context.Context, dec func(inte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Live_ReceiveEvents_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(LiveServer).ReceiveEvents(&liveReceiveEventsServer{stream})
+}
+
+type Live_ReceiveEventsServer interface {
+	SendAndClose(*EventSummary) error
+	Recv() (*Event, error)
+	grpc.ServerStream
+}
+
+type liveReceiveEventsServer struct {
+	grpc.ServerStream
+}
+
+func (x *liveReceiveEventsServer) SendAndClose(m *EventSummary) error {
+	return x.ServerStream.SendMsg(m)
+}
+
+func (x *liveReceiveEventsServer) Recv() (*Event, error) {
+	m := new(Event)
+	if err := x.ServerStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 // Live_ServiceDesc is the grpc.ServiceDesc for Live service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -173,6 +240,12 @@ var Live_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Live_HeartBeat_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "ReceiveEvents",
+			Handler:       _Live_ReceiveEvents_Handler,
+			ClientStreams: true,
+		},
+	},
 	Metadata: "api/senate/senate.proto",
 }

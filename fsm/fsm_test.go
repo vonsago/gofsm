@@ -111,14 +111,14 @@ func mockWaitCallback(fsm *FSM) error {
 	return nil
 }
 
-// TestFsm Test Content
+// TestFsm Test Mode local Content
 // 1.findNewTask prepare to waiting
 // 2.tryCreateJob waiting to running
 // 3.TaskRun on running
 // 4.TaskClear on fail done
 //
 // mock data is from ...
-func TestFsm(t *testing.T) {
+func TestFsmLocal(t *testing.T) {
 	testMockCount := 10
 	events := []EventDesc{
 		{
@@ -170,4 +170,46 @@ func TestFsm(t *testing.T) {
 		cc <- true
 	}()
 	<-cc
+}
+
+func TestFsmSingle(t *testing.T) {
+	events := []EventDesc{
+		{
+			Name: "tryCreateJob",
+			Src:  []string{"waiting"},
+			Dst:  "running",
+		}, {
+			Name: "TaskRun",
+			Src:  []string{"running"},
+			Dst:  "",
+		}, {
+			Name: "TaskClear",
+			Src:  []string{"fail", "done"},
+			Dst:  "",
+		},
+	}
+	// register state transition func
+	f := NewFSM(events, 1*time.Second, ModeSingle, true, 8)
+	go f.LoopControl()
+}
+
+func TestFsmCluster(t *testing.T) {
+	events := []EventDesc{
+		{
+			Name: "tryCreateJob",
+			Src:  []string{"waiting"},
+			Dst:  "running",
+		}, {
+			Name: "TaskRun",
+			Src:  []string{"running"},
+			Dst:  "",
+		}, {
+			Name: "TaskClear",
+			Src:  []string{"fail", "done"},
+			Dst:  "",
+		},
+	}
+	// register state transition func
+	f := NewFSM(events, 1*time.Second, ModeCluster, true, 8)
+	go f.LoopControl()
 }

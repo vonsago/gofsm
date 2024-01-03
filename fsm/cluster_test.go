@@ -28,3 +28,7 @@ func TestClusters3(t *testing.T) {
 	time.Sleep(time.Second * 30)
 	cls3.stopc <- true
 }
+
+func TestClusterFsm(t *testing.T) {
+
+}
