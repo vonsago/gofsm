@@ -67,10 +67,11 @@ func trans2(event *Event) (dst string, err error) {
 		if r%3 == 0 {
 			task := taskMockEvent[taskId]
 			task.Event = "TaskClear"
-			task.Src = "done"
+			task.Src = "fail"
 			task.Dst = ""
 			if r%2 == 0 {
-				task.Src = "fail"
+				task.Src = "done"
+				task.Canceled = true
 			}
 		}
 		<-ch
@@ -106,8 +107,6 @@ func trans3(event *Event) (dst string, err error) {
 }
 
 func mockWaitCallback(fsm *FSM) error {
-	tasks := fsm.GetMetadata("mockTasks").([]*Event)
-	fsm.FanIn(tasks...)
 	return nil
 }
 
@@ -146,14 +145,17 @@ func TestFsmLocal(t *testing.T) {
 	for i := 0; i < testMockCount; i++ {
 		taskData := make(map[string]string)
 		taskData["task_id"] = strconv.Itoa(i)
-		taskMockEvent = append(taskMockEvent, &Event{
+		e := &Event{
 			FSM: f, ID: taskData["task_id"], Event: "findNewTask",
 			Src: "prepare", Dst: "waiting", Metadata: taskData,
-			Callback: testCallback,
-		})
+			Callback: "testCallback",
+		}
+		taskMockEvent = append(taskMockEvent, e)
+		_ = f.Apply(e)
 	}
+	f.RegisterEventCallback("testCallback", testCallback)
 	f.SetMetadata("mockTasks", taskMockEvent)
-	// wait injection mock task
+	// user ...
 	f.RegisterCallback(WAIT, mockWaitCallback)
 	// register status flow strategy
 	f.Register("findNewTask", "prepare", "waiting", trans0)

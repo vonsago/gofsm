@@ -11,8 +11,11 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/reflection"
 	"net"
+	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -35,7 +38,7 @@ type ClusterConf struct {
 	Clusters   string
 	Timeout    int32
 	LeaderWork bool
-	// cache result
+	// cache cluster result
 	Regular *cache.Cache
 	// cluster status
 	Nodes map[string]*Node
@@ -46,6 +49,10 @@ type ClusterConf struct {
 	eventc chan *Event
 	nodec  chan *Node
 	ctx    context.Context
+	// fsm
+	fsm *FSM
+	// signal chan for listen terminal options
+	sigC chan os.Signal
 }
 
 type Node struct {
@@ -59,7 +66,7 @@ type Node struct {
 	conn     *grpc.ClientConn
 }
 
-func NewClusterConf(id, ids, addrs string, timeout int32, work bool) *ClusterConf {
+func NewClusterConf(id, ids, addrs string, timeout int32, work bool, fsm *FSM) *ClusterConf {
 	nodes := make(map[string]*Node)
 	idm := strings.Split(ids, ",")
 	for i, v := range strings.Split(addrs, ",") {
@@ -88,6 +95,7 @@ func NewClusterConf(id, ids, addrs string, timeout int32, work bool) *ClusterCon
 		eventc:     make(chan *Event),
 		nodec:      make(chan *Node),
 		ctx:        context.Background(),
+		fsm:        fsm,
 	}
 	return c
 }
@@ -98,7 +106,7 @@ func (cf *ClusterConf) startServe() error {
 	cf.nlock.RUnlock()
 	listener, err := net.Listen("tcp", ln.Addr)
 	if err != nil {
-		log.Errorf("start serve at %s error: %v", ln.Addr, err)
+		log.Errorf("FSM Cluster node %s start serve at %s error: %v", cf.Id, ln.Addr, err)
 		return err
 	}
 	s := grpc.NewServer()
@@ -115,7 +123,7 @@ func (cf *ClusterConf) startServe() error {
 			panic(err)
 		}
 	}()
-	log.Infof("start serve at %s", ln.Addr)
+	log.Infof("FSM Cluster node %s start serve at %s", cf.Id, ln.Addr)
 	return nil
 }
 
@@ -130,23 +138,23 @@ func (cf *ClusterConf) selfCheck() {
 		cf.Nodes[cf.Id].Role = Follower
 		cf.nlock.Unlock()
 	case Leader:
-		cf.SyncTerm2Others(ln)
+		cf.syncTerm2Others(ln)
 	case Follower:
 		if int32(time.Now().Unix()-ln.AliveT.Unix()) > cf.Timeout {
-			if !cf.ClusterHasLeader() {
+			if !cf.clusterHasLeader() {
 				cf.nlock.Lock()
 				ns[cf.Id].Role = Candidate
 				cf.nlock.Unlock()
 			}
 		}
 	case Candidate:
-		if cf.StartCampaign(ln) {
+		if cf.startCampaign(ln) {
 			cf.nlock.Lock()
 			ns[cf.Id].Role = Leader
 			ns[cf.Id].Term += 1
 			cf.nlock.Unlock()
 		} else {
-			if cf.CheckClusterHealthy() {
+			if cf.checkClusterHealthy() {
 			}
 		}
 	}
@@ -157,7 +165,7 @@ func (cf *ClusterConf) selfCheck() {
 	cf.nlock.RUnlock()
 }
 
-func (cf *ClusterConf) GetOrConnectOthers() error {
+func (cf *ClusterConf) getOrConnectOthers() error {
 	//var kacp = keepalive.ClientParameters{
 	//	Time:                10 * time.Second, // send pings every 10 seconds if there is no activity
 	//	Timeout:             time.Second,      // wait 1 second for ping ack before considering the connection dead
@@ -192,8 +200,8 @@ func (cf *ClusterConf) DisconnectAll() error {
 	return nil
 }
 
-func (cf *ClusterConf) ClusterHasLeader() bool {
-	_ = cf.GetOrConnectOthers()
+func (cf *ClusterConf) clusterHasLeader() bool {
+	_ = cf.getOrConnectOthers()
 	for _, v := range cf.Nodes {
 		if v.Id == cf.Id {
 			continue
@@ -215,8 +223,8 @@ func (cf *ClusterConf) ClusterHasLeader() bool {
 	return false
 }
 
-func (cf *ClusterConf) CheckClusterHealthy() bool {
-	_ = cf.GetOrConnectOthers()
+func (cf *ClusterConf) checkClusterHealthy() bool {
+	_ = cf.getOrConnectOthers()
 	aliveCount := 1
 	for _, v := range cf.Nodes {
 		if v.Id == cf.Id {
@@ -243,11 +251,11 @@ func (cf *ClusterConf) CheckClusterHealthy() bool {
 	return true
 }
 
-func (cf *ClusterConf) StartCampaign(ln *Node) bool {
+func (cf *ClusterConf) startCampaign(ln *Node) bool {
 	cf.nlock.Lock()
 	defer cf.nlock.Unlock()
 
-	_ = cf.GetOrConnectOthers()
+	_ = cf.getOrConnectOthers()
 	getVotes := 0
 	aliveCount := 0
 	selfVotes := 0
@@ -318,8 +326,8 @@ func (cf *ClusterConf) StartCampaign(ln *Node) bool {
 	return false
 }
 
-func (cf *ClusterConf) SyncTerm2Others(ln *Node) {
-	err := cf.GetOrConnectOthers()
+func (cf *ClusterConf) syncTerm2Others(ln *Node) {
+	err := cf.getOrConnectOthers()
 	if err != nil {
 		log.Errorf("connect to other error %v", err)
 	}
@@ -371,6 +379,30 @@ func (cf *ClusterConf) passServeNode(n *Node) {
 	cf.nlock.Unlock()
 }
 
+func (cf *ClusterConf) passServeEvent(e *Event) {
+	_ = cf.fsm.Apply(e)
+}
+
+func (cf *ClusterConf) signalHandler() {
+	signal.Notify(cf.sigC, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGUSR1)
+	for sig := range cf.sigC {
+		switch sig {
+		case syscall.SIGUSR1:
+			time.Sleep(2 * time.Second)
+		case syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT:
+			cf.Quit()
+		default:
+			log.Infof("signalHandler receive signal %v", sig)
+		}
+	}
+}
+
+func (cf *ClusterConf) Quit() {
+	close(cf.nodec)
+	cf.stopc <- true
+	log.Info("Quit FSM Cluster")
+}
+
 func (cf *ClusterConf) PutNode(id, addr string) error {
 	cf.nlock.Lock()
 	defer cf.nlock.Unlock()
@@ -388,6 +420,7 @@ func (cf *ClusterConf) PutNode(id, addr string) error {
 }
 
 func (cf *ClusterConf) Run() {
+	cf.signalHandler()
 	err := cf.startServe()
 	if err != nil {
 		return
@@ -395,7 +428,13 @@ func (cf *ClusterConf) Run() {
 	go func() {
 		for {
 			select {
-			case n := <-cf.nodec:
+			case e := <-cf.eventc:
+				cf.passServeEvent(e)
+			case n, open := <-cf.nodec:
+				if !open {
+					cf.stopc <- true
+					break
+				}
 				cf.passServeNode(n)
 			}
 		}
@@ -403,7 +442,8 @@ func (cf *ClusterConf) Run() {
 	for {
 		select {
 		case <-cf.stopc:
-			log.Debug("stop cluster")
+			log.Infof("Stop FSM Cluster node: %s", cf.Id)
+			cf.fsm.Quit()
 			return
 		case <-cf.timer.C:
 			cf.selfCheck()

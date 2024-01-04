@@ -13,12 +13,6 @@ import (
 	"time"
 )
 
-type TransCostType struct {
-	id    string
-	trans string
-	cost  time.Duration
-}
-
 const (
 	ModeLocal   = "local"
 	ModeSingle  = "singleton"
@@ -36,7 +30,9 @@ const (
 
 type FSM struct {
 	// mode
-	Mode string
+	Mode    string
+	EventsQ []*Event
+	elock   sync.RWMutex
 	// current is the state that the FSM is currently in.
 	// enum (new, run, wait, quit)
 	current string
@@ -47,15 +43,13 @@ type FSM struct {
 	// fanCount
 	fanCount int
 
-	// cluster
-	cluster ClusterConf
-
 	// allEvents and allStates record FSM strategy
 	allEvents map[string]bool
 	allStates map[string]bool
 	// callback func will be executed in specific FSM current state
 	// register callback use RegisterCallback()
-	callback map[string]func(fsm *FSM) error
+	callback      map[string]func(fsm *FSM) error
+	eventCallback map[string]func(event *Event, e *TransFsmError)
 	// transitions maps events and source states to destination states.
 	transitions map[eKey]string
 	// transition is the internal transition functions used either directly
@@ -81,6 +75,12 @@ type FSM struct {
 
 	// signal chan for listen terminal options
 	sigC chan os.Signal
+}
+
+type TransCostType struct {
+	id    string
+	trans string
+	cost  time.Duration
 }
 
 func stack() []byte {
@@ -142,7 +142,7 @@ func (f *FSM) signalHandler() {
 		case syscall.SIGUSR1:
 			time.Sleep(2 * time.Second)
 		case syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT:
-			f.quit()
+			f.Quit()
 		default:
 			log.Infof("signalHandler receive signal %v", sig)
 		}
@@ -230,6 +230,12 @@ func (f *FSM) RegisterCallback(c string, callback func(fsm *FSM) error) {
 	}
 }
 
+// RegisterEventCallback
+// register event callback
+func (f *FSM) RegisterEventCallback(c string, callback func(event *Event, e *TransFsmError)) {
+	f.eventCallback[c] = callback
+}
+
 // FanIn
 // event to chan
 func (f *FSM) FanIn(events ...*Event) {
@@ -263,15 +269,17 @@ func (f *FSM) FanOut() {
 				ek := eKey{event.Event, event.Src}
 				if ed, ok := f.transitions[ek]; ok {
 					dst, err := f.transition[f.GetTransName(ek, ed)](event)
+					var TransError *TransFsmError
 					if err != nil || dst != event.Dst {
-						TransError := &TransFsmError{
+						TransError = &TransFsmError{
 							Msg:    "transition error occur",
 							Detail: err,
 							Dst:    dst,
 						}
-						event.Callback(event, TransError)
-					} else {
-						event.Callback(event, nil)
+
+					}
+					if callback, found := f.eventCallback[event.Callback]; found {
+						callback(event, TransError)
 					}
 					tc := time.Since(st)
 					// todo use channel instead of lock
@@ -297,6 +305,26 @@ func (f *FSM) GetTransName(e eKey, dst string) string {
 	} else {
 		return fmt.Sprintf("T%sFrom%sTo%s", e.event, e.src, dst)
 	}
+}
+
+// Apply event to fsm queue
+func (f *FSM) Apply(e *Event) error {
+	f.elock.Lock()
+	defer f.elock.Unlock()
+	f.EventsQ = append(f.EventsQ, e)
+	return nil
+}
+
+// Cancel event from fsm queue
+func (f *FSM) Cancel(id string) error {
+	f.elock.Lock()
+	defer f.elock.Unlock()
+	for _, e := range f.EventsQ {
+		if e.ID == id {
+			e.Canceled = true
+		}
+	}
+	return nil
 }
 
 // selfCheck
@@ -337,6 +365,10 @@ func (f *FSM) wait() error {
 	if c != WAIT {
 		return ErrFSMIsRunning
 	}
+	// fanin events
+	f.elock.RLock()
+	f.FanIn(f.EventsQ...)
+	f.elock.RUnlock()
 	// wait callback
 	if callback, ok := f.callback[WAIT]; ok {
 		if e := callback(f); e != nil {
@@ -348,6 +380,18 @@ func (f *FSM) wait() error {
 		f.showReport()
 	}
 	return nil
+}
+
+func (f *FSM) flushQ() {
+	f.elock.Lock()
+	defer f.elock.Unlock()
+	nq := make([]*Event, 0)
+	for _, e := range f.EventsQ {
+		if !e.Canceled {
+			nq = append(nq, e)
+		}
+	}
+	f.EventsQ = nq
 }
 
 func (f *FSM) RunFan() error {
@@ -368,7 +412,7 @@ func (f *FSM) RunFan() error {
 	return nil
 }
 
-func (f *FSM) quit() {
+func (f *FSM) Quit() {
 	if f.Current() == QUIT {
 		return
 	}
@@ -397,7 +441,7 @@ func (f *FSM) quit() {
 //	 ├─Loop─> wait() [callback[WAIT]] ──> Run() [callback[RUN]]
 //		         └──> showReport()
 //	 ├  *setCurrent(QUIT) to quit loop
-//	 └──> quit() [callback[QUIT]]
+//	 └──> Quit() [callback[QUIT]]
 func (f *FSM) LoopControl() {
 	go f.signalHandler()
 	f.selfCheck()
@@ -416,28 +460,31 @@ func (f *FSM) LoopControl() {
 		cost := time.Now().UnixMilli() - st
 		f.SetMetadata(FSMetaCost, cost)
 		log.Infof("FSM Run cost: %d ms", cost)
+		go f.flushQ()
 		time.Sleep(f.interval)
 	}
-	f.quit()
+	f.Quit()
 }
 
 func NewFSM(events []EventDesc, interval time.Duration, mode string, showFlow bool, fanCount int) *FSM {
 	f := &FSM{
-		Mode:        mode,
-		current:     NEW,
-		interval:    interval,
-		showFlow:    showFlow,
-		fanCount:    fanCount,
-		transCost:   list.New(),
-		transitions: make(map[eKey]string),
-		callback:    make(map[string]func(fmt *FSM) error),
-		transition:  make(map[string]func(event *Event) (dst string, err error)),
-		metadata:    make(map[string]interface{}),
-		eventFan:    make(chan *Event),
-		eventCount:  0,
-		allEvents:   make(map[string]bool),
-		allStates:   make(map[string]bool),
-		sigC:        make(chan os.Signal, 1),
+		Mode:          mode,
+		EventsQ:       make([]*Event, 0),
+		current:       NEW,
+		interval:      interval,
+		showFlow:      showFlow,
+		fanCount:      fanCount,
+		transCost:     list.New(),
+		transitions:   make(map[eKey]string),
+		callback:      make(map[string]func(fmt *FSM) error),
+		eventCallback: make(map[string]func(event *Event, e *TransFsmError)),
+		transition:    make(map[string]func(event *Event) (dst string, err error)),
+		metadata:      make(map[string]interface{}),
+		eventFan:      make(chan *Event),
+		eventCount:    0,
+		allEvents:     make(map[string]bool),
+		allStates:     make(map[string]bool),
+		sigC:          make(chan os.Signal, 1),
 	}
 	// Cache tasks list for run consume
 	// Notice memory size
@@ -480,7 +527,7 @@ type Event struct {
 	MetaMu sync.RWMutex
 
 	// Callback is the Event's callback
-	Callback func(event *Event, e *TransFsmError)
+	Callback string
 
 	// Canceled is an internal flag set if the transition is canceled.
 	Canceled bool
