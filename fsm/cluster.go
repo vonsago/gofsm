@@ -43,16 +43,14 @@ type ClusterConf struct {
 	// cluster status
 	Nodes map[string]*Node
 	nlock sync.RWMutex
-	stopc chan bool
 	timer *time.Ticker
 	// channel for server to self node
 	eventc chan *Event
 	nodec  chan *Node
 	ctx    context.Context
+	cancel context.CancelFunc
 	// fsm
 	fsm *FSM
-	// signal chan for listen terminal options
-	sigC chan os.Signal
 }
 
 type Node struct {
@@ -68,6 +66,7 @@ type Node struct {
 
 func NewClusterConf(id, ids, addrs string, timeout int32, work bool, fsm *FSM) *ClusterConf {
 	nodes := make(map[string]*Node)
+	ctx, can := context.WithCancel(context.Background())
 	idm := strings.Split(ids, ",")
 	for i, v := range strings.Split(addrs, ",") {
 		nodes[idm[i]] = &Node{
@@ -94,7 +93,8 @@ func NewClusterConf(id, ids, addrs string, timeout int32, work bool, fsm *FSM) *
 		timer:      time.NewTicker(1 * time.Second),
 		eventc:     make(chan *Event),
 		nodec:      make(chan *Node),
-		ctx:        context.Background(),
+		ctx:        ctx,
+		cancel:     can,
 		fsm:        fsm,
 	}
 	return c
@@ -384,23 +384,20 @@ func (cf *ClusterConf) passServeEvent(e *Event) {
 }
 
 func (cf *ClusterConf) signalHandler() {
-	signal.Notify(cf.sigC, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGUSR1)
-	for sig := range cf.sigC {
+	sigC := make(chan os.Signal)
+	signal.Notify(sigC, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGUSR1)
+	for sig := range sigC {
 		switch sig {
 		case syscall.SIGUSR1:
 			time.Sleep(2 * time.Second)
 		case syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT:
-			cf.Quit()
+			close(cf.nodec)
+			cf.cancel()
+			log.Info("Quit FSM Cluster")
 		default:
 			log.Infof("signalHandler receive signal %v", sig)
 		}
 	}
-}
-
-func (cf *ClusterConf) Quit() {
-	close(cf.nodec)
-	cf.stopc <- true
-	log.Info("Quit FSM Cluster")
 }
 
 func (cf *ClusterConf) PutNode(id, addr string) error {
@@ -420,7 +417,7 @@ func (cf *ClusterConf) PutNode(id, addr string) error {
 }
 
 func (cf *ClusterConf) Run() {
-	cf.signalHandler()
+	go cf.signalHandler()
 	err := cf.startServe()
 	if err != nil {
 		return
@@ -432,7 +429,7 @@ func (cf *ClusterConf) Run() {
 				cf.passServeEvent(e)
 			case n, open := <-cf.nodec:
 				if !open {
-					cf.stopc <- true
+					cf.cancel()
 					break
 				}
 				cf.passServeNode(n)
@@ -441,7 +438,7 @@ func (cf *ClusterConf) Run() {
 	}()
 	for {
 		select {
-		case <-cf.stopc:
+		case <-cf.ctx.Done():
 			log.Infof("Stop FSM Cluster node: %s", cf.Id)
 			cf.fsm.Quit()
 			return

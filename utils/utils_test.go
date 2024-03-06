@@ -21,6 +21,7 @@ func TestRandomPick(t *testing.T) {
 	c := []string{"1", "2"}
 	p := []float64{0.01, 0.99}
 	c1, c2 := 0, 0
+	RandomPick([]map[int]int{{1: 1}}, p)
 	for i := 0; i < 100; i += 1 {
 		r := RandomPick(c, p)
 		if r == "1" {
